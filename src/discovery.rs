@@ -34,18 +34,30 @@ pub fn discover_hosts_files() -> Vec<PathBuf> {
     }
     scan_hosts_dir(Path::new("/etc/hosts.d"), &mut files);
 
-    // 3. User configuration directory (~/.config/hosts.d and ~/.config/lvr/hosts.d)
+    // 3. XDG Runtime and Cache directories for fast LVRIPC / daemon sync
+    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        let runtime_hosts = PathBuf::from(runtime.trim()).join("lvr/hosts");
+        if runtime_hosts.is_file() {
+            files.push(runtime_hosts);
+        }
+    }
+
+    // 4. User configuration directory (~/.config/hosts.d and ~/.config/lvr/hosts.d)
     if let Ok(home) = std::env::var("HOME") {
         let home_p = PathBuf::from(home);
         let user_hosts = home_p.join(".config/hosts");
         if user_hosts.is_file() {
             files.push(user_hosts);
         }
+        let lvr_user_hosts = home_p.join(".config/lvr/hosts");
+        if lvr_user_hosts.is_file() {
+            files.push(lvr_user_hosts);
+        }
         scan_hosts_dir(&home_p.join(".config/hosts.d"), &mut files);
         scan_hosts_dir(&home_p.join(".config/lvr/hosts.d"), &mut files);
     }
 
-    // 4. Wine / Proton prefix hosts files
+    // 5. Wine / Proton prefix hosts files
     discover_wine_prefix_hosts(&mut files);
 
     // Deduplicate paths while preserving order
