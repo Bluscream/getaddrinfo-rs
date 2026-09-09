@@ -1,8 +1,9 @@
-name: CI
+name: CI & Release
 
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
@@ -20,3 +21,44 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Run Tests
         run: cargo test --all-targets -- --nocapture
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+            apt: ""
+          - target: i686-unknown-linux-gnu
+            name: linux-i686
+            apt: gcc-multilib libc6-dev-i386
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install dependencies
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+      - name: Build Release
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package Artifacts
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/libgetaddrinfo.so dist/libgetaddrinfo-${{ matrix.name }}.so
+          cp target/${{ matrix.target }}/release/getaddrinfo-rs dist/getaddrinfo-rs-${{ matrix.name }}
+          cd dist && tar -czf getaddrinfo-rs-${{ matrix.name }}.tar.gz *
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/libgetaddrinfo-${{ matrix.name }}.so
+            dist/getaddrinfo-rs-${{ matrix.name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
