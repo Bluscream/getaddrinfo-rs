@@ -14,16 +14,7 @@ pub fn discover_hosts_files() -> Vec<PathBuf> {
             files.push(p);
         }
     }
-    if let Ok(val) = std::env::var("LVR_HOSTS") {
-        let p = PathBuf::from(val.trim());
-        if p.is_file() {
-            files.push(p);
-        }
-    }
     if let Ok(val) = std::env::var("HOSTS_DIR") {
-        scan_hosts_dir(Path::new(val.trim()), &mut files);
-    }
-    if let Ok(val) = std::env::var("LVR_HOSTS_DIR") {
         scan_hosts_dir(Path::new(val.trim()), &mut files);
     }
 
@@ -34,42 +25,17 @@ pub fn discover_hosts_files() -> Vec<PathBuf> {
     }
     scan_hosts_dir(Path::new("/etc/hosts.d"), &mut files);
 
-    // 3. XDG Runtime and Cache directories for fast LVRIPC / daemon sync
-    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-        let runtime_hosts = PathBuf::from(runtime.trim()).join("lvr/hosts");
-        if runtime_hosts.is_file() {
-            files.push(runtime_hosts);
-        }
-        scan_hosts_dir(&PathBuf::from(runtime.trim()).join("lvr/hosts.d"), &mut files);
-    }
-
-    // 4. User configuration and cache directories (~/.config/hosts.d, ~/.cache/lvr/hosts, etc.)
+    // 3. User configuration directories (~/.config/hosts, ~/.config/hosts.d)
     if let Ok(home) = std::env::var("HOME") {
         let home_p = PathBuf::from(home);
         let user_hosts = home_p.join(".config/hosts");
         if user_hosts.is_file() {
             files.push(user_hosts);
         }
-        let lvr_user_hosts = home_p.join(".config/lvr/hosts");
-        if lvr_user_hosts.is_file() {
-            files.push(lvr_user_hosts);
-        }
-        let lvr_cache_hosts = home_p.join(".cache/lvr/hosts");
-        if lvr_cache_hosts.is_file() {
-            files.push(lvr_cache_hosts);
-        }
         scan_hosts_dir(&home_p.join(".config/hosts.d"), &mut files);
-        scan_hosts_dir(&home_p.join(".config/lvr/hosts.d"), &mut files);
-        scan_hosts_dir(&home_p.join(".cache/lvr/hosts.d"), &mut files);
     }
 
-    // 5. Fallback path
-    let tmp_hosts = PathBuf::from("/tmp/lvr_hosts");
-    if tmp_hosts.is_file() {
-        files.push(tmp_hosts);
-    }
-
-    // 6. Wine / Proton prefix hosts files
+    // 4. Wine / Proton prefix hosts files
     discover_wine_prefix_hosts(&mut files);
 
     // Deduplicate paths while preserving order
@@ -79,22 +45,23 @@ pub fn discover_hosts_files() -> Vec<PathBuf> {
     files
 }
 
-/// Discovers hosts and hosts.d files in Wine/Proton prefixes using environment variables,
-/// current working directory detection, and Steam's libraryfolders.vdf.
+/// Discovers hosts and hosts.d files in Wine/Proton prefixes using standard environment
+/// variables and current working directory detection.
 fn discover_wine_prefix_hosts(files: &mut Vec<PathBuf>) {
-    // 1. Check explicit WINEPREFIX
+    // 1. Check explicit standard WINEPREFIX
     if let Ok(wineprefix) = std::env::var("WINEPREFIX") {
         let prefix = PathBuf::from(wineprefix.trim());
         add_prefix_hosts_candidates(&prefix, files);
     }
 
-    // 2. Check STEAM_COMPAT_DATA_PATH (set by Steam/Proton inside proton launch environment)
+    // 2. Check STEAM_COMPAT_DATA_PATH (standard Steam/Proton environment variable)
     if let Ok(compat_path) = std::env::var("STEAM_COMPAT_DATA_PATH") {
         let prefix = PathBuf::from(compat_path.trim()).join("pfx");
         add_prefix_hosts_candidates(&prefix, files);
     }
 
-    // 3. Inspect current working directory hierarchy for a parent `compatdata/<appid>/pfx`
+    // 3. Inspect current working directory hierarchy for an enclosing Wine prefix:
+    // Any directory having `drive_c/windows/system32/drivers/etc/` or `pfx/drive_c/...`
     if let Ok(cwd) = std::env::current_dir() {
         let mut curr = Some(cwd.as_path());
         while let Some(dir) = curr {
@@ -102,58 +69,11 @@ fn discover_wine_prefix_hosts(files: &mut Vec<PathBuf>) {
                 add_prefix_hosts_candidates(dir, files);
                 break;
             }
+            if dir.join("pfx/drive_c/windows/system32/drivers/etc").is_dir() {
+                add_prefix_hosts_candidates(&dir.join("pfx"), files);
+                break;
+            }
             curr = dir.parent();
-        }
-    }
-
-    // 4. Automatically find Steam library folders from standard Steam root paths
-    let mut steam_roots = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        let home_p = PathBuf::from(home);
-        steam_roots.push(home_p.join(".local/share/Steam"));
-        steam_roots.push(home_p.join(".steam/steam"));
-        steam_roots.push(home_p.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"));
-    }
-
-    let mut library_dirs = Vec::new();
-    for root in &steam_roots {
-        if root.is_dir() {
-            library_dirs.push(root.clone());
-            // Parse libraryfolders.vdf
-            let lib_vdf = root.join("steamapps/libraryfolders.vdf");
-            if let Ok(content) = std::fs::read_to_string(&lib_vdf) {
-                parse_steam_library_folders(&content, &mut library_dirs);
-            }
-        }
-    }
-
-    // Deduplicate libraries
-    let mut seen_libs = std::collections::HashSet::new();
-    library_dirs.retain(|l| seen_libs.insert(l.clone()));
-
-    // Search for any active compatdata prefixes in all discovered Steam libraries
-    // (targeting VRChat 438100 as well as any other apps)
-    for lib in library_dirs {
-        let vrc_pfx = lib.join("steamapps/compatdata/438100/pfx");
-        if vrc_pfx.is_dir() {
-            add_prefix_hosts_candidates(&vrc_pfx, files);
-        }
-    }
-}
-
-/// Parses library folder paths out of Steam's `libraryfolders.vdf`.
-fn parse_steam_library_folders(content: &str, libraries: &mut Vec<PathBuf>) {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("\"path\"") {
-            let parts: Vec<&str> = trimmed.split('"').filter(|s| !s.trim().is_empty()).collect();
-            if parts.len() >= 2 {
-                let path_str = parts[1];
-                let p = PathBuf::from(path_str);
-                if p.is_dir() {
-                    libraries.push(p);
-                }
-            }
         }
     }
 }
