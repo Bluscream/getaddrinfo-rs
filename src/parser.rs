@@ -1,5 +1,7 @@
 //! Extended HOSTS file parser supporting standard IP mappings, multiple hostnames per line,
 //! wildcards (* and ?), hostname-to-hostname redirects, and inline comments.
+//! Uses the established `hostfile` crate for standard line parsing, with extensions for
+//! wildcards, redirects, and comment preservation.
 
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -51,20 +53,44 @@ pub fn parse_line(line: &str) -> HostLine {
         None => (line, None),
     };
 
-    let tokens: Vec<&str> = content_part.split_whitespace().collect();
-    if tokens.is_empty() {
+    let content_trimmed = content_part.trim();
+    if content_trimmed.is_empty() {
         return match comment_part {
             Some(c) => HostLine::Comment(format!("#{c}")),
             None => HostLine::Empty,
         };
     }
 
+    // 1. Try standard parser using `hostfile::HostEntry`
+    if let Ok(entry) = hostfile::HostEntry::from_str(content_trimmed) {
+        let mut rules = Vec::new();
+        for name in entry.names {
+            let lower = name.trim().to_lowercase();
+            if !lower.is_empty() {
+                rules.push(HostRule::Address {
+                    pattern: lower,
+                    ip: entry.ip,
+                });
+            }
+        }
+        return HostLine::Entry {
+            raw_text: line.to_string(),
+            rules,
+            inline_comment: comment_part,
+        };
+    }
+
+    // 2. Extension parsing: Handles wildcard hostnames with IPs or hostname-to-hostname redirects
+    let tokens: Vec<&str> = content_part.split_whitespace().collect();
+    if tokens.is_empty() {
+        return HostLine::Empty;
+    }
+
     let first = tokens[0];
     let mut rules = Vec::new();
 
-    // Check if the first token is an IP address
     if let Ok(ip) = IpAddr::from_str(first) {
-        // Standard hosts format: IP name1 [name2 name3...]
+        // e.g. 0.0.0.0 *.github.io ??-test.com (where hostfile might reject wildcard characters)
         for &name in &tokens[1..] {
             let lower = name.trim().to_lowercase();
             if !lower.is_empty() {
@@ -75,7 +101,7 @@ pub fn parse_line(line: &str) -> HostLine {
             }
         }
     } else if tokens.len() >= 2 {
-        // Hostname-to-hostname redirect: source_pattern target_hostname
+        // Hostname-to-hostname redirect: source_pattern target_hostname (e.g. google.com bing.com)
         let pattern = first.trim().to_lowercase();
         let target_hostname = tokens[1].trim().to_lowercase();
         if !pattern.is_empty() && !target_hostname.is_empty() {

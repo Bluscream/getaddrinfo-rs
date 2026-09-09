@@ -79,43 +79,80 @@ pub fn discover_hosts_files() -> Vec<PathBuf> {
     files
 }
 
-/// Discovers hosts and hosts.d files in Wine/Proton prefixes.
+/// Discovers hosts and hosts.d files in Wine/Proton prefixes using environment variables,
+/// current working directory detection, and Steam's libraryfolders.vdf.
 fn discover_wine_prefix_hosts(files: &mut Vec<PathBuf>) {
-    // Check WINEPREFIX
+    // 1. Check explicit WINEPREFIX
     if let Ok(wineprefix) = std::env::var("WINEPREFIX") {
         let prefix = PathBuf::from(wineprefix.trim());
         add_prefix_hosts_candidates(&prefix, files);
     }
 
-    // Check STEAM_COMPAT_DATA_PATH
+    // 2. Check STEAM_COMPAT_DATA_PATH (set by Steam/Proton inside proton launch environment)
     if let Ok(compat_path) = std::env::var("STEAM_COMPAT_DATA_PATH") {
         let prefix = PathBuf::from(compat_path.trim()).join("pfx");
         add_prefix_hosts_candidates(&prefix, files);
     }
 
-    // Check known common Proton compatdata prefixes (e.g. VRChat 438100)
-    let candidates = [
-        "/run/media/system/Data/Games/Steam/steamapps/compatdata/438100/pfx",
-        "/run/media/system/Data/SteamLibrary/steamapps/compatdata/438100/pfx",
-    ];
-
-    for c in candidates {
-        let p = PathBuf::from(c);
-        if p.is_dir() {
-            add_prefix_hosts_candidates(&p, files);
+    // 3. Inspect current working directory hierarchy for a parent `compatdata/<appid>/pfx`
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut curr = Some(cwd.as_path());
+        while let Some(dir) = curr {
+            if dir.join("drive_c/windows/system32/drivers/etc").is_dir() {
+                add_prefix_hosts_candidates(dir, files);
+                break;
+            }
+            curr = dir.parent();
         }
     }
 
+    // 4. Automatically find Steam library folders from standard Steam root paths
+    let mut steam_roots = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
-        let steam_roots = [
-            format!("{home}/.local/share/Steam/steamapps/compatdata/438100/pfx"),
-            format!("{home}/.steam/steam/steamapps/compatdata/438100/pfx"),
-            format!("{home}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/438100/pfx"),
-        ];
-        for s in steam_roots {
-            let p = PathBuf::from(s);
-            if p.is_dir() {
-                add_prefix_hosts_candidates(&p, files);
+        let home_p = PathBuf::from(home);
+        steam_roots.push(home_p.join(".local/share/Steam"));
+        steam_roots.push(home_p.join(".steam/steam"));
+        steam_roots.push(home_p.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"));
+    }
+
+    let mut library_dirs = Vec::new();
+    for root in &steam_roots {
+        if root.is_dir() {
+            library_dirs.push(root.clone());
+            // Parse libraryfolders.vdf
+            let lib_vdf = root.join("steamapps/libraryfolders.vdf");
+            if let Ok(content) = std::fs::read_to_string(&lib_vdf) {
+                parse_steam_library_folders(&content, &mut library_dirs);
+            }
+        }
+    }
+
+    // Deduplicate libraries
+    let mut seen_libs = std::collections::HashSet::new();
+    library_dirs.retain(|l| seen_libs.insert(l.clone()));
+
+    // Search for any active compatdata prefixes in all discovered Steam libraries
+    // (targeting VRChat 438100 as well as any other apps)
+    for lib in library_dirs {
+        let vrc_pfx = lib.join("steamapps/compatdata/438100/pfx");
+        if vrc_pfx.is_dir() {
+            add_prefix_hosts_candidates(&vrc_pfx, files);
+        }
+    }
+}
+
+/// Parses library folder paths out of Steam's `libraryfolders.vdf`.
+fn parse_steam_library_folders(content: &str, libraries: &mut Vec<PathBuf>) {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("\"path\"") {
+            let parts: Vec<&str> = trimmed.split('"').filter(|s| !s.trim().is_empty()).collect();
+            if parts.len() >= 2 {
+                let path_str = parts[1];
+                let p = PathBuf::from(path_str);
+                if p.is_dir() {
+                    libraries.push(p);
+                }
             }
         }
     }
