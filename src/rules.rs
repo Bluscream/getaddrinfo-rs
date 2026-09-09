@@ -56,6 +56,15 @@ impl RuleTable {
         Self::default()
     }
 
+    /// Loads parsed host lines into the rule table.
+    pub fn load_lines<I: IntoIterator<Item = crate::parser::HostLine>>(&mut self, lines: I) {
+        for line in lines {
+            if let crate::parser::HostLine::Entry { rules, .. } = line {
+                self.rules.extend(rules);
+            }
+        }
+    }
+
     /// Loads rules from the provided file paths.
     pub fn load_from_paths(paths: &[PathBuf]) -> Self {
         let mut rules = Vec::new();
